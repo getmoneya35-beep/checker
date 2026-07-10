@@ -49,7 +49,7 @@
 
   <script>
     async function update() {
-      const res = await fetch('/api/counter?thisisnotabot=true');
+      const res = await fetch('/api/counter'); // ✅ NO increment
       const data = await res.json();
 
       document.getElementById('counter').textContent = data.liveRequests;
@@ -57,7 +57,7 @@
       const ipsDiv = document.getElementById('ips');
       ipsDiv.innerHTML = data.lastIPs.map(entry => `
         <div class="ip-entry">
-          ${entry.flag ? `<img src="${entry.flag}" width="24" height="18">` : ""}
+          <img src="${entry.flag}" width="24" height="18">
           <span>${entry.ip} — ${entry.country}</span>
         </div>
       `).join('');
