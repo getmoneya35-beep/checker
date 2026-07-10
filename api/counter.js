@@ -1,12 +1,16 @@
-let count = 0;   // In-memory (resets on deploy). For persistence use KV later.
+let count = 0;
 
 export default function handler(req, res) {
-  count++;   // Increment on every request to this endpoint
+  const isRealRequest = req.query.thisisnotabot === "true";
 
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  
+  if (isRealRequest) {
+    count++;
+  }
+
   res.json({
     liveRequests: count,
+    totalHits: count,           // you can remove this if you want
+    counted: isRealRequest,
     timestamp: new Date().toISOString()
   });
 }
