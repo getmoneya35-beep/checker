@@ -1,70 +1,65 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Live Counter</title>
-  <style>
-    body {
-      font-family: Arial;
-      text-align: center;
-      padding: 50px;
-      background: #f5f5f5;
-    }
+<meta charset="UTF-8">
+<title>Live Counter</title>
 
-    #counter {
-      font-size: 6rem;
-      color: #0066ff;
-      margin-bottom: 30px;
-    }
+<style>
+body {
+  font-family: Arial;
+  text-align: center;
+  padding: 50px;
+}
 
-    #ips {
-      max-width: 400px;
-      margin: 0 auto;
-      text-align: left;
-    }
+#counter {
+  font-size: 6rem;
+  color: #0066ff;
+}
 
-    .ip-entry {
-      display: flex;
-      align-items: center;
-      background: white;
-      padding: 10px;
-      margin-bottom: 8px;
-      border-radius: 8px;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-      font-size: 14px;
-    }
+#ips {
+  margin: 20px auto;
+  max-width: 400px;
+  text-align: left;
+}
 
-    .ip-entry img {
-      margin-right: 10px;
-      border-radius: 3px;
-    }
-  </style>
+.ip {
+  background: #f1f1f1;
+  padding: 10px;
+  margin: 5px;
+  border-radius: 5px;
+}
+</style>
+
 </head>
+
 <body>
-  <h1>Live Requests</h1>
-  <div id="counter">0</div>
 
-  <h2>Last 10 Requests</h2>
-  <div id="ips"></div>
+<h1>Live Requests</h1>
 
-  <script>
-    async function update() {
-      const res = await fetch('/api/counter'); // ✅ NO increment
-      const data = await res.json();
+<div id="counter">0</div>
 
-      document.getElementById('counter').textContent = data.liveRequests;
+<h2>Last 10 IPs</h2>
 
-      const ipsDiv = document.getElementById('ips');
-      ipsDiv.innerHTML = data.lastIPs.map(entry => `
-        <div class="ip-entry">
-          <img src="${entry.flag}" width="24" height="18">
-          <span>${entry.ip} — ${entry.country}</span>
-        </div>
-      `).join('');
-    }
+<div id="ips"></div>
 
-    setInterval(update, 1000);
-    update();
-  </script>
+
+<script>
+async function update() {
+  const res = await fetch('/api/counter');
+  const data = await res.json();
+
+  document.getElementById("counter").textContent =
+    data.liveRequests;
+
+  document.getElementById("ips").innerHTML =
+    data.lastIPs.map(ip =>
+      `<div class="ip">${ip}</div>`
+    ).join("");
+}
+
+update();
+setInterval(update, 1000);
+</script>
+
 </body>
 </html>
