@@ -3,18 +3,68 @@
 <head>
   <meta charset="UTF-8">
   <title>Live Counter</title>
-  <style>body{font-family:Arial;text-align:center;padding:50px;} #counter{font-size:6rem;color:#0066ff;}</style>
+  <style>
+    body {
+      font-family: Arial;
+      text-align: center;
+      padding: 50px;
+      background: #f5f5f5;
+    }
+
+    #counter {
+      font-size: 6rem;
+      color: #0066ff;
+      margin-bottom: 30px;
+    }
+
+    #ips {
+      max-width: 400px;
+      margin: 0 auto;
+      text-align: left;
+    }
+
+    .ip-entry {
+      display: flex;
+      align-items: center;
+      background: white;
+      padding: 10px;
+      margin-bottom: 8px;
+      border-radius: 8px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+      font-size: 14px;
+    }
+
+    .ip-entry img {
+      margin-right: 10px;
+      border-radius: 3px;
+    }
+  </style>
 </head>
 <body>
   <h1>Live Requests</h1>
   <div id="counter">0</div>
 
+  <h2>Last 10 Requests</h2>
+  <div id="ips"></div>
+
   <script>
-    setInterval(async () => {
-      const res = await fetch('/api/counter');
+    async function update() {
+      const res = await fetch('/api/counter?thisisnotabot=true');
       const data = await res.json();
+
       document.getElementById('counter').textContent = data.liveRequests;
-    }, 1000);
+
+      const ipsDiv = document.getElementById('ips');
+      ipsDiv.innerHTML = data.lastIPs.map(entry => `
+        <div class="ip-entry">
+          ${entry.flag ? `<img src="${entry.flag}" width="24" height="18">` : ""}
+          <span>${entry.ip} — ${entry.country}</span>
+        </div>
+      `).join('');
+    }
+
+    setInterval(update, 1000);
+    update();
   </script>
 </body>
 </html>
