@@ -1,30 +1,43 @@
 let count = 0;
 let lastIPs = [];
 
-export default function handler(req, res) {
+export default async function handler(req, res) {
   const isRealRequest = req.query.thisisnotabot === "true";
 
-  // Get real IP (works on Vercel)
   const ip =
     req.headers["x-forwarded-for"]?.split(",")[0] ||
     req.socket?.remoteAddress ||
     "unknown";
 
-  if (isRealRequest) {
+  if (isRealRequest && ip !== "unknown") {
     count++;
 
-    // Add IP to the front
-    lastIPs.unshift(ip);
+    try {
+      // Fetch geo info
+      const geoRes = await fetch(`https://ipapi.co/${ip}/json/`);
+      const geo = await geoRes.json();
 
-    // Keep only last 10
-    lastIPs = lastIPs.slice(0, 10);
+      const entry = {
+        ip: ip,
+        country: geo.country_name || "Unknown",
+        flag: geo.country_code
+          ? `https://flagcdn.com/24x18/${geo.country_code.toLowerCase()}.png`
+          : ""
+      };
+
+      // Add to list
+      lastIPs.unshift(entry);
+      lastIPs = lastIPs.slice(0, 10);
+
+    } catch (e) {
+      // fallback if API fails
+      lastIPs.unshift({ ip, country: "Unknown", flag: "" });
+      lastIPs = lastIPs.slice(0, 10);
+    }
   }
 
   res.json({
     liveRequests: count,
-    totalHits: count,
-    counted: isRealRequest,
-    lastIPs,
-    timestamp: new Date().toISOString()
+    lastIPs
   });
 }
