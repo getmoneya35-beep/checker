@@ -1,39 +1,37 @@
 let count = 0;
 let lastIPs = [];
 
-export default async function handler(req, res) {
+// SUPER simple fallback country guess (you can expand this)
+function getCountryFromIP(ip) {
+  if (ip.startsWith("192.") || ip.startsWith("127.") || ip.startsWith("::1")) {
+    return { code: "us", name: "Local" };
+  }
+
+  // fallback default
+  return { code: "us", name: "Unknown" };
+}
+
+export default function handler(req, res) {
   const isRealRequest = req.query.thisisnotabot === "true";
 
   const ip =
-    req.headers["x-forwarded-for"]?.split(",")[0] ||
+    req.headers["x-forwarded-for"]?.split(",")[0].trim() ||
     req.socket?.remoteAddress ||
     "unknown";
 
-  if (isRealRequest && ip !== "unknown") {
+  if (isRealRequest) {
     count++;
 
-    try {
-      // Fetch geo info
-      const geoRes = await fetch(`https://ipapi.co/${ip}/json/`);
-      const geo = await geoRes.json();
+    const country = getCountryFromIP(ip);
 
-      const entry = {
-        ip: ip,
-        country: geo.country_name || "Unknown",
-        flag: geo.country_code
-          ? `https://flagcdn.com/24x18/${geo.country_code.toLowerCase()}.png`
-          : ""
-      };
+    const entry = {
+      ip,
+      country: country.name,
+      flag: `https://flagcdn.com/24x18/${country.code}.png`
+    };
 
-      // Add to list
-      lastIPs.unshift(entry);
-      lastIPs = lastIPs.slice(0, 10);
-
-    } catch (e) {
-      // fallback if API fails
-      lastIPs.unshift({ ip, country: "Unknown", flag: "" });
-      lastIPs = lastIPs.slice(0, 10);
-    }
+    lastIPs.unshift(entry);
+    lastIPs = lastIPs.slice(0, 10);
   }
 
   res.json({
