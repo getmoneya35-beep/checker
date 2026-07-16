@@ -1,64 +1,695 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Command Panel</title>
-  <style>
-    body { font-family: monospace; padding: 20px; background: #111; color: #0f0; }
-    input, button { padding: 10px; margin: 5px; }
-    pre { background: #000; padding: 10px; overflow: auto; }
-  </style>
+<meta charset="UTF-8">
+<title>Combo Weave</title>
+<style>
+    body {
+        margin: 0; padding: 0; background: #111; color: #0f0;
+        font-family: 'Courier New', monospace;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        height: 100vh; overflow: hidden;
+    }
+    canvas { border: 4px solid #0f0; box-shadow: 0 0 30px #0f0; }
+    #ui {
+        position: absolute; top: 20px; left: 20px; pointer-events: none; z-index: 10;
+    }
+    .stat { font-size: 26px; text-shadow: 0 0 10px #0f0; margin: 6px 0; }
+    #instructions {
+        position: absolute; bottom: 20px; text-align: center; width: 100%; font-size: 18px; opacity: 0.85;
+    }
+    #gameOver {
+        position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        background: rgba(0,0,0,0.95); padding: 40px 60px; border: 3px solid #f00; text-align: center; display: none;
+    }
+</style>
 </head>
 <body>
-  <h1>Command Control</h1>
-  
-  <input type="text" id="cmd" placeholder="Enter command (e.g. whoami)" style="width: 400px;">
-  <button onclick="sendCommand()">Send Command</button>
-  
-  <h2>Output:</h2>
-  <pre id="output">Waiting for output...</pre>
 
-  <script>
-    let lastId = 0;
-    const apiUrl = 'https://checker-nu-seven.vercel.app/api/counter'; // ← CHANGE THIS
+<canvas id="game"></canvas>
 
-    async function sendCommand() {
-      const cmd = document.getElementById('cmd').value;
-      if (!cmd) return;
+<div id="ui">
+    <div class="stat">Score: <span id="score">0</span></div>
+    <div class="stat">Combo: <span id="combo">0</span>x</div>
+    <div class="stat">High Score: <span id="highscore">0</span></div>
+    <div class="stat">Time Alive: <span id="timeAlive">0.0s</span></div>
+    <div class="stat">Round: <span id="roundLabel">1</span></div>
+    <div class="stat">Fazer: <span id="fazerState">READY</span></div>
+</div>
 
-      const id = Date.now();
-      await fetch(apiUrl, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ command: cmd, id: id })
-      });
-      document.getElementById('cmd').value = '';
+<div id="instructions">
+    WASD / Arrow Keys — Move<br>
+    <strong>Weave between red orbs!</strong> Going through the middle of two or more gives big points
+</div>
+
+<div id="gameOver">
+    <h1>GAME OVER</h1>
+    <p>Final Score: <span id="finalScore">0</span></p>
+    <p>Best Combo: <span id="bestCombo">0</span>x</p>
+    <button onclick="restartGame()" style="padding:12px 30px; font-size:20px; background:#0f0; color:#000; border:none; cursor:pointer;">PLAY AGAIN</button>
+</div>
+
+<script>
+
+// =============== COMBO WEAVE ===============
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+const scoreEl = document.getElementById('score');
+const comboEl = document.getElementById('combo');
+const highscoreEl = document.getElementById('highscore');
+const timeAliveEl = document.getElementById('timeAlive');
+const roundLabelEl = document.getElementById('roundLabel');
+const fazerStateEl = document.getElementById('fazerState');
+const gameOverScreen = document.getElementById('gameOver');
+const finalScoreEl = document.getElementById('finalScore');
+const bestComboEl = document.getElementById('bestCombo');
+
+const CONFIG = {
+    arena: { width: 800, height: 600 },
+    player: { x: 0, y: 0, size: 10, speed: 8.5, color: '#0ff' },
+    enemy: {
+        size: 25,
+        baseSpeed: 2.5,
+        speedVariance: 0,
+        chaseDelayMinFrames: 0,
+        chaseDelayMaxFrames: 100,
+        collisionPadding: 4,
+        color: '#f33'
+    },
+    spawn: {
+        startEnemies: 5,
+        enemyCap: 100
+    },
+    ability: {
+        fazerCooldownMs: 1000,
+        blockerSize: 10,
+        phaseTriggerMargin: 10,
+        fazeReward: 120
+    },
+    trail: {
+        maxLength: 500
+    },
+    dash: {
+        speed: 22,
+        duration: 120,
+        cooldown: 500
     }
+};
 
-    async function poll() {
-      try {
-        const res = await fetch(`${apiUrl}?latestId=${lastId}`);
-        const data = await res.json();
+const ROUND_TABLE = [
+    { triggerAt: 0, spawnPerSecond: 1.2, breakMs: 0, label: '1', weaveMin: 600, weaveMax: 670, weaveCenter: 100, weaveScore: 80, comboCooldownMs: 1400, weaveCooldownMs: 1000 },
+    { triggerAt: 12, spawnPerSecond: 2, breakMs: 1800, label: '2', weaveMin: 44, weaveMax: 150, weaveCenter: 40, weaveScore: 100, comboCooldownMs: 1300, weaveCooldownMs: 550 },
+    { triggerAt: 25, spawnPerSecond: 2.7, breakMs: 1500, label: '3', weaveMin: 48, weaveMax: 160, weaveCenter: 42, weaveScore: 120, comboCooldownMs: 1250, weaveCooldownMs: 500 },
+    { triggerAt: 45, spawnPerSecond: 3.5, breakMs: 1300, label: '4', weaveMin: 52, weaveMax: 170, weaveCenter: 44, weaveScore: 140, comboCooldownMs: 1200, weaveCooldownMs: 450 },
+    { triggerAt: 70, spawnPerSecond: 4.1, breakMs: 1100, label: '5', weaveMin: 56, weaveMax: 180, weaveCenter: 46, weaveScore: 160, comboCooldownMs: 1150, weaveCooldownMs: 450 },
+    { triggerAt: 90, spawnPerSecond: 4.7, breakMs: 900, label: '6', weaveMin: 60, weaveMax: 190, weaveCenter: 48, weaveScore: 180, comboCooldownMs: 1100, weaveCooldownMs: 400 },
+    { triggerAt: 115, spawnPerSecond: 5.5, breakMs: 700, label: '7', weaveMin: 64, weaveMax: 200, weaveCenter: 50, weaveScore: 200, comboCooldownMs: 1050, weaveCooldownMs: 380 }
+];
 
-        if (data.commands && data.commands.length > 0) {
-          data.commands.forEach(c => {
-            console.log(`New command: ${c.command}`);
-          });
+let score = 0;
+let combo = 0;
+let maxCombo = 0;
+let highScore = localStorage.getItem('comboWeaveHigh') || 0;
+highscoreEl.textContent = highScore;
+
+const player = { ...CONFIG.player };
+
+let keys = {};
+let enemies = [];
+let particles = [];
+let trail = [];
+let lastWeave = 0;
+let comboTimer = 0;
+let gameStartTime = performance.now();
+let survivalSeconds = 0;
+let currentRound = 0;
+let roundBreakUntil = 0;
+let isRoundBreak = false;
+let spawnAccumulator = 0;
+let fazerCooldownUntil = 0;
+let activeFazer = null;
+let enemyLinks = [];
+
+// === DASH + FAZE COMBO ===
+let isDashing = false;
+let dashTimer = 0;
+let dashCooldown = 0;
+let dashStart = null;
+let dashEnd = null;
+let isPhaseDashing = false;
+let phaseDashEndTime = 0;
+let lastFazerTriggerTime = 0;
+
+function resizeCanvas() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    CONFIG.arena.width = canvas.width;
+    CONFIG.arena.height = canvas.height;
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+class Enemy {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.size = CONFIG.enemy.size;
+        this.speed = CONFIG.enemy.baseSpeed + Math.random() * CONFIG.enemy.speedVariance;
+        this.color = CONFIG.enemy.color;
+        this.delayFrames = CONFIG.enemy.chaseDelayMinFrames + Math.floor(Math.random() * (CONFIG.enemy.chaseDelayMaxFrames - CONFIG.enemy.chaseDelayMinFrames + 1));
+        this.history = [];
+        this.fade = 0;
+        this.dead = false;
+    }
+    update() {
+        this.history.push({ x: player.x, y: player.y });
+        if (this.history.length > this.delayFrames + 1) {
+            this.history.shift();
         }
 
-        if (data.outputs) {
-          const outDiv = document.getElementById('output');
-          Object.keys(data.outputs).forEach(id => {
-            outDiv.textContent = data.outputs[id];
-            lastId = Math.max(lastId, parseInt(id));
-          });
+        const target = this.history[0] || { x: player.x, y: player.y };
+
+        let dx = target.x - this.x;
+        let dy = target.y - this.y;
+        let dist = Math.hypot(dx, dy);
+
+        let moveX = 0;
+        let moveY = 0;
+
+        if (dist > 0) {
+            moveX += (dx / dist) * this.speed;
+            moveY += (dy / dist) * this.speed;
         }
-      } catch(e) {}
+
+        let repelX = 0;
+        let repelY = 0;
+        const separationRadius = 40;
+
+        for (const other of enemies) {
+            if (other === this) continue;
+            const dx2 = this.x - other.x;
+            const dy2 = this.y - other.y;
+            const d = Math.hypot(dx2, dy2);
+            if (d > 0 && d < separationRadius) {
+                const force = (separationRadius - d) / separationRadius;
+                repelX += (dx2 / d) * force;
+                repelY += (dy2 / d) * force;
+            }
+        }
+
+        const repelStrength = 1.8;
+        this.x += moveX + repelX * repelStrength;
+        this.y += moveY + repelY * repelStrength;
+    }
+}
+
+class Particle {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() - 0.5) * 7;
+        this.vy = (Math.random() - 0.5) * 7;
+        this.life = 30;
+        this.color = '#0ff';
+    }
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.vx *= 0.96;
+        this.vy *= 0.96;
+        this.life--;
+    }
+}
+
+function spawnEnemy() {
+    const side = Math.floor(Math.random() * 4);
+    let x, y;
+    if (side === 0) { x = Math.random() * CONFIG.arena.width; y = -50; }
+    else if (side === 1) { x = CONFIG.arena.width + 50; y = Math.random() * CONFIG.arena.height; }
+    else if (side === 2) { x = Math.random() * CONFIG.arena.width; y = CONFIG.arena.height + 50; }
+    else { x = -50; y = Math.random() * CONFIG.arena.height; }
+    enemies.push(new Enemy(x, y));
+}
+
+function createWeaveParticles(x, y) {
+    for (let i = 0; i < 25; i++) {
+        const p = new Particle(x, y);
+        p.color = '#ff0';
+        particles.push(p);
+    }
+}
+
+function refreshFazerUi() {
+    const now = performance.now();
+    const ready = now >= fazerCooldownUntil;
+    if (ready) {
+        fazerStateEl.textContent = 'READY';
+    } else {
+        const secondsLeft = Math.max(1, Math.ceil((fazerCooldownUntil - now) / 1000));
+        fazerStateEl.textContent = 'COOLING ' + secondsLeft + 's';
+    }
+}
+
+function getNearestEnemyIndex() {
+    let nearestIndex = -1;
+    let nearestDistance = Infinity;
+    for (let i = 0; i < enemies.length; i++) {
+        const dist = Math.hypot(enemies[i].x - player.x, enemies[i].y - player.y);
+        if (dist < nearestDistance) {
+            nearestDistance = dist;
+            nearestIndex = i;
+        }
+    }
+    return nearestIndex;
+}
+
+function triggerFazer() {
+    if (performance.now() < fazerCooldownUntil || activeFazer) return;
+    const nearestIndex = getNearestEnemyIndex();
+    if (nearestIndex === -1) return;
+
+    const nearestEnemy = enemies[nearestIndex];
+    activeFazer = {
+        x: (player.x + nearestEnemy.x) / 2,
+        y: (player.y + nearestEnemy.y) / 2,
+        size: CONFIG.ability.blockerSize,
+        targetEnemyIndex: nearestIndex,
+        life: Infinity
+    };
+
+    fazerCooldownUntil = performance.now() + CONFIG.ability.fazerCooldownMs;
+    lastFazerTriggerTime = performance.now();
+    refreshFazerUi();
+}
+
+function tryDash() {
+    if (dashCooldown > 0 || isDashing) return;
+
+    const now = performance.now();
+    const isCombo = activeFazer && (now - lastFazerTriggerTime < 900);
+
+    isDashing = true;
+    isPhaseDashing = isCombo;
+    dashTimer = CONFIG.dash.duration;
+    dashCooldown = CONFIG.dash.cooldown;
+    dashStart = { x: player.x, y: player.y };
+
+    if (isPhaseDashing) player.invulnerable = true;
+}
+
+function handleDashAttack() {
+    if (!dashStart || !dashEnd) return;
+    const lineRadius = 60;
+
+    for (let i = enemies.length - 1; i >= 0; i--) {
+        const dist = pointToLineDistance(enemies[i], dashStart, dashEnd);
+        if (dist < lineRadius) {
+            enemies.splice(i, 1);
+            score += 50;
+            combo += 1;
+        }
+    }
+}
+
+function pointToLineDistance(p, a, b) {
+    const A = p.x - a.x;
+    const B = p.y - a.y;
+    const C = b.x - a.x;
+    const D = b.y - a.y;
+    const dot = A * C + B * D;
+    const lenSq = C * C + D * D;
+    let param = -1;
+    if (lenSq !== 0) param = dot / lenSq;
+    let xx, yy;
+    if (param < 0) { xx = a.x; yy = a.y; }
+    else if (param > 1) { xx = b.x; yy = b.y; }
+    else { xx = a.x + param * C; yy = a.y + param * D; }
+    return Math.hypot(p.x - xx, p.y - yy);
+}
+
+function consumeFazer() {
+    if (!activeFazer) return;
+    const targetEnemy = enemies[activeFazer.targetEnemyIndex];
+    if (targetEnemy) {
+        targetEnemy.fade = 1;
+        targetEnemy.dead = true;
+        score += CONFIG.ability.fazeReward;
+        createWeaveParticles(targetEnemy.x, targetEnemy.y);
+    }
+    activeFazer = null;
+}
+
+function update() {
+    const now = performance.now();
+    updateRoundState(now);
+
+    let dx = 0, dy = 0;
+    if (keys['ArrowLeft'] || keys['a'] || keys['A']) dx--;
+    if (keys['ArrowRight'] || keys['d'] || keys['D']) dx++;
+    if (keys['ArrowUp'] || keys['w'] || keys['W']) dy--;
+    if (keys['ArrowDown'] || keys['s'] || keys['S']) dy++;
+
+    if (dx || dy) {
+        const len = Math.hypot(dx, dy);
+        dx /= len;
+        dy /= len;
     }
 
-    setInterval(poll, 2000); // Check every 2 seconds
-    poll();
-  </script>
+    if (dashCooldown > 0) dashCooldown -= 16;
+
+    if (isDashing) {
+        dashTimer -= 16;
+
+        if (isPhaseDashing && activeFazer) {
+            const tx = activeFazer.x;
+            const ty = activeFazer.y;
+            let dx2 = tx - player.x;
+            let dy2 = ty - player.y;
+            const dist = Math.hypot(dx2, dy2);
+            if (dist > 5) {
+                player.x += (dx2 / dist) * CONFIG.dash.speed * 1.1;
+                player.y += (dy2 / dist) * CONFIG.dash.speed * 1.1;
+            }
+        } else {
+            player.x += dx * CONFIG.dash.speed;
+            player.y += dy * CONFIG.dash.speed;
+        }
+
+        if (dashTimer <= 0) {
+            isDashing = false;
+            dashEnd = { x: player.x, y: player.y };
+            handleDashAttack();
+
+            if (isPhaseDashing) {
+                phaseDashEndTime = now + 500;
+                consumeFazer();
+            }
+            isPhaseDashing = false;
+            player.invulnerable = false;
+        }
+    } else if (dx || dy) {
+        player.x += dx * player.speed;
+        player.y += dy * player.speed;
+    }
+
+    player.x = Math.max(20, Math.min(CONFIG.arena.width - 20, player.x));
+    player.y = Math.max(20, Math.min(CONFIG.arena.height - 20, player.y));
+    checkLineCrossings();
+
+    trail.push({ x: player.x, y: player.y });
+    if (trail.length > CONFIG.trail.maxLength) trail.shift();
+
+    if (activeFazer) {
+        activeFazer.life -= 16;
+        if (activeFazer.life <= 0) {
+            activeFazer = null;
+        } else {
+            const distToBlocker = Math.hypot(player.x - activeFazer.x, player.y - activeFazer.y);
+            if (distToBlocker < activeFazer.size + player.size + CONFIG.ability.phaseTriggerMargin) {
+                consumeFazer();
+            }
+        }
+    }
+
+    for (let i = enemies.length - 1; i >= 0; i--) {
+        const enemy = enemies[i];
+
+        if (enemy.dead) {
+            enemies.splice(i, 1);
+            continue;
+        }
+
+        if (enemy.fade > 0) {
+            enemy.fade -= 0.08;
+            if (enemy.fade <= 0) {
+                enemies.splice(i, 1);
+                continue;
+            }
+        }
+
+        if (activeFazer && Math.hypot(enemy.x - activeFazer.x, enemy.y - activeFazer.y) < enemy.size + activeFazer.size) {
+            enemy.fade = 1;
+            enemy.dead = true;
+            score += CONFIG.ability.fazeReward;
+            createWeaveParticles(enemy.x, enemy.y);
+            activeFazer = null;
+            continue;
+        }
+
+        enemy.update();
+
+        const isInvuln = isDashing || player.invulnerable || (now < phaseDashEndTime);
+        if (!isInvuln) {
+            if (Math.hypot(enemy.x - player.x, enemy.y - player.y) < player.size + enemy.size + CONFIG.enemy.collisionPadding) {
+                gameOver();
+                return;
+            }
+        }
+    }
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+        particles[i].update();
+        if (particles[i].life <= 0) particles.splice(i, 1);
+    }
+
+    const roundInfo = getRoundInfo();
+    if (!isRoundBreak && enemies.length < CONFIG.spawn.enemyCap) {
+        const dt = Math.max(1, Math.min(32, now - (update.lastFrameTime || now)));
+        spawnAccumulator += (roundInfo.spawnPerSecond * dt) / 1000;
+        while (spawnAccumulator >= 1) {
+            spawnEnemy();
+            spawnAccumulator -= 1;
+        }
+    }
+
+    update.lastFrameTime = now;
+}
+
+function updateRoundState(now) {
+    survivalSeconds = (now - gameStartTime) / 1000;
+
+    if (currentRound < ROUND_TABLE.length - 1 && survivalSeconds >= ROUND_TABLE[currentRound + 1].triggerAt) {
+        currentRound++;
+        const nextRound = ROUND_TABLE[currentRound];
+        if (nextRound.breakMs > 0) {
+            roundBreakUntil = now + nextRound.breakMs;
+            isRoundBreak = true;
+            enemies = [];
+            spawnAccumulator = 0;
+            activeFazer = null;
+        } else {
+            roundBreakUntil = 0;
+            isRoundBreak = false;
+        }
+    }
+
+    if (isRoundBreak && now >= roundBreakUntil) {
+        isRoundBreak = false;
+        roundBreakUntil = 0;
+    }
+
+    const roundInfo = getRoundInfo();
+    roundLabelEl.textContent = roundInfo.label;
+    timeAliveEl.textContent = survivalSeconds.toFixed(1) + 's';
+    scoreEl.textContent = score;
+    comboEl.textContent = combo;
+    refreshFazerUi();
+}
+
+function getRoundInfo() {
+    return ROUND_TABLE[Math.min(currentRound, ROUND_TABLE.length - 1)];
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0a0a';
+    ctx.fillRect(0, 0, CONFIG.arena.width, CONFIG.arena.height);
+
+    ctx.strokeStyle = '#1a1a1a';
+    for (let x = 40; x < CONFIG.arena.width; x += 40) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, CONFIG.arena.height);
+        ctx.stroke();
+    }
+    for (let y = 40; y < CONFIG.arena.height; y += 40) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(CONFIG.arena.width, y);
+        ctx.stroke();
+    }
+
+    if (isRoundBreak) {
+        ctx.fillStyle = 'rgba(255, 255, 0, 0.12)';
+        ctx.fillRect(0, 0, CONFIG.arena.width, CONFIG.arena.height);
+        ctx.fillStyle = '#ff0';
+        ctx.font = 'bold 28px Courier New';
+        ctx.textAlign = 'center';
+        ctx.fillText('BREAK', CONFIG.arena.width / 2, 40);
+        ctx.textAlign = 'start';
+    }
+
+    for (let i = 0; i < trail.length; i++) {
+        const alpha = (i + 1) / trail.length;
+        ctx.globalAlpha = alpha * 0.35;
+        ctx.fillStyle = '#0ff';
+        ctx.beginPath();
+        ctx.arc(trail[i].x, trail[i].y, Math.max(2, player.size * 0.45), 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.shadowBlur = 25;
+    ctx.shadowColor = '#0ff';
+    ctx.fillStyle = player.color;
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    if (activeFazer) {
+        ctx.strokeStyle = '#0ff';
+        ctx.lineWidth = 4;
+        ctx.shadowBlur = 18;
+        ctx.shadowColor = '#0ff';
+        ctx.beginPath();
+        ctx.arc(activeFazer.x, activeFazer.y, activeFazer.size, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+    }
+
+    for (const e of enemies) {
+        if (e.fade > 0) ctx.globalAlpha = e.fade;
+
+        ctx.fillStyle = e.color;
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, e.size, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = '#f44';
+        ctx.strokeStyle = '#faa';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, e.size + 5, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 1;
+    }
+
+    for (const p of particles) {
+        ctx.globalAlpha = p.life / 30;
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x - 3, p.y - 3, 6, 6);
+    }
+    ctx.globalAlpha = 1;
+}
+
+function drawEnemyLinks() {
+    const maxDist = 400;
+    enemyLinks = [];
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.lineWidth = 2;
+
+    for (let i = 0; i < enemies.length; i++) {
+        for (let j = i + 1; j < enemies.length; j++) {
+            const a = enemies[i];
+            const b = enemies[j];
+            const dist = Math.hypot(a.x - b.x, a.y - b.y);
+
+            if (dist < maxDist) {
+                enemyLinks.push({a, b});
+                ctx.beginPath();
+                ctx.moveTo(a.x, a.y);
+                ctx.lineTo(b.x, b.y);
+                ctx.stroke();
+            }
+        }
+    }
+}
+
+function checkLineCrossings() {
+    const threshold = 8;
+    for (let i = enemyLinks.length - 1; i >= 0; i--) {
+        const line = enemyLinks[i];
+        const dist = pointToLineDistance(
+            {x: player.x, y: player.y},
+            line.a,
+            line.b
+        );
+
+        if (dist < threshold) {
+            line.a.dead = true;
+            line.b.dead = true;
+            score += 250;
+            combo++;
+            maxCombo = Math.max(maxCombo, combo);
+            createWeaveParticles((line.a.x + line.b.x)/2, (line.a.y + line.b.y)/2);
+            enemyLinks.splice(i, 1);
+        }
+    }
+}
+
+function gameLoop() {
+    update();
+    draw();
+    drawEnemyLinks();
+    requestAnimationFrame(gameLoop);
+}
+
+function gameOver() {
+    if (score > highScore) {
+        highScore = score;
+        localStorage.setItem('comboWeaveHigh', highScore);
+    }
+    finalScoreEl.textContent = score;
+    bestComboEl.textContent = maxCombo;
+    highscoreEl.textContent = highScore;
+    gameOverScreen.style.display = 'block';
+}
+
+function restartGame() {
+    score = combo = maxCombo = 0;
+    enemies = [];
+    particles = [];
+    trail = [];
+    player.x = CONFIG.arena.width / 2;
+    player.y = CONFIG.arena.height / 2;
+    gameStartTime = performance.now();
+    survivalSeconds = 0;
+    currentRound = 0;
+    roundBreakUntil = 0;
+    isRoundBreak = false;
+    spawnAccumulator = 0;
+    fazerCooldownUntil = 0;
+    activeFazer = null;
+    isDashing = false;
+    isPhaseDashing = false;
+    dashCooldown = 0;
+    phaseDashEndTime = 0;
+    gameOverScreen.style.display = 'none';
+    scoreEl.textContent = 0;
+    comboEl.textContent = 0;
+    timeAliveEl.textContent = '0.0s';
+    roundLabelEl.textContent = '1';
+    fazerStateEl.textContent = 'READY';
+    for (let i = 0; i < CONFIG.spawn.startEnemies; i++) spawnEnemy();
+}
+
+// Controls
+document.addEventListener('keydown', e => {
+    keys[e.key] = true;
+    if (e.code === 'Space') tryDash();
+    if (e.key === 'f' || e.key === 'F') triggerFazer();
+});
+document.addEventListener('keyup', e => keys[e.key] = false);
+canvas.addEventListener('touchstart', e => e.preventDefault());
+canvas.addEventListener('mousedown', e => e.preventDefault());
+
+// Start
+restartGame();
+gameLoop();
+</script>
 </body>
 </html>
