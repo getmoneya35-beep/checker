@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<!--
+  ScanCard v1.0 — Bit-grid secret image share
+  =============================================
+  BIT LAYOUT (per row = 16 columns, MSB first):
+    Bytes 0–1  : uint16 magic      = 0xA55A
+    Bytes 2–3  : uint16 length     = payload byte count (UTF-8)
+    Bytes 4–N  : payload UTF-8     (URL or "local:" + 8-hex id)
+    Bytes N+1–N+2 : uint16 CRC-16/CCITT-FALSE over payload bytes only
+    Remaining  : 0x00 pad to fill final row (16 cols)
+
+  GRID SPEC:
+    Cols : 16 (fixed)
+    Rows : ceil((4 + payloadLen + 2) * 8 / 16) — padded to full row
+    Cell : 24px default (camera), 16px for file-decode tests
+    0-bit: rgb(255,255,255)
+    1-bit: rgb(170–220,170–220,170–220) via stealth/reliability slider
+    Finder: thin colored border (8-12px) + corner L-marks, NOT filled
+
+  FINDER COLOR: hue-shifted cyan (#00B4D8 ±20°) for detection
+  INSET: border_px from outer edge before sampling cells
+  ADAPTIVE THRESHOLD: (maxLuma + minLuma) / 2 per decoded grid
+
+  STORAGE: IndexedDB db="scancard" store="images" key=8-hex id
+  FETCH: if payload starts with "local:" → read IndexedDB
+         if payload starts with "http"   → fetch as blob
+-->
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ScanCard</title>
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --surface: #ffffff;
+    --border: #e2e2de;
+    --text: #1a1a1a;
+    --sub: #6b6b6b;
+    --accent: #00B4D8;
+    --accent-dark: #0090ad;
+    --err: #c0392b;
+    --ok: #2d7a4f;
+    --radius: 10px;
+    --mono: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+    --sans: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  header {
+    width: 100%;
+    max-width: 640px;
+    padding: 28px 24px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  header h1 {
+    font-size: 1.35rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text);
+  }
+
+  header p {
+    font-size: 0.8rem;
+    color: var(--sub);
+    letter-spacing: 0.01em;
+  }
+
+  nav {
+    width: 100%;
+    max-width: 640px;
+    display: flex;
+    gap: 4px;
+    padding: 16px 24px 0;
+  }
+
+  nav button {
+    flex: 1;
+    padding: 9px 0;
+    background: transparent;
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius);
+    font-family: var(--sans);
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--sub);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  nav button.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
+  nav button:hover:not(.active) {
+    border-color: var(--accent);
+    color: var(--accent-dark);
+  }
+
+  main {
+    width: 100%;
+    max-width: 640px;
+    padding: 20px 24px 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .tab { display: none; flex-direction: column; gap: 16px; }
+  .tab.visible { display: flex; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .card-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--sub);
+  }
+
+  label {
+    font-size: 0.8rem;
+    color: var(--sub);
+    display: block;
+    margin-bottom: 4px;
+  }
+
+  input[type="text"], input[type="url"] {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1.5px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    background: var(--bg);
+    color: var(--text);
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  input[type="text"]:focus, input[type="url"]:focus {
+    border-color: var(--accent);
+  }
+
+  input[type="file"] {
+    display: none;
+  }
+
+  .file-pick {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .btn {
+    padding: 9px 18px;
+    border: none;
+    border-radius: 6px;
+    font-family: var(--sans);
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+  }
+
+  .btn-primary:hover { background: var(--accent-dark); }
+  .btn-primary:disabled { background: #b0d9e8; cursor: default; }
+
+  .btn-ghost {
+    background: transparent;
+    border: 1.5px solid var(--border);
+    color: var(--text);
+  }
+
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent-dark); }
+
+  .btn-sm {
+    padding: 6px 12px;
+    font-size: 0.76rem;
+  }
+
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.76rem;
+    color: var(--sub);
+  }
+
+  .slider-row input[type="range"] {
+    flex: 1;
+    accent-color: var(--accent);
+  }
+
+  .status {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    padding: 8px 12px;
+    border-radius: 6px;
+    line-height: 1.5;
+  }
+
+  .status.ok { background: #eaf5ef; color: var(--ok); }
+  .status.err { background: #fdf0ee; color: var(--err); }
+  .status.info { background: #eef7fb; color: #0077a0; }
+  .status.hidden { display: none; }
+
+  #card-canvas {
+    display: block;
+    margin: 0 auto;
+    border-radius: 4px;
+    image-rendering: pixelated;
+    max-width: 100%;
+  }
+
+  #card-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .row-btns {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  /* ── SCAN TAB ── */
+  #video-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    background: #111;
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  #scan-video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  #scan-overlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  /* corner marks drawn via canvas */
+  #scan-overlay canvas {
+    width: 100%;
+    height: 100%;
+  }
+
+  .cam-controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  #result-img {
+    display: none;
+    max-width: 100%;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+  }
+
+  #scan-canvas { display: none; }
+  #decode-canvas { display: none; }
+
+  /* file pick label-as-button */
+  .file-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 9px 18px;
+    background: transparent;
+    border: 1.5px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--sans);
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    color: var(--text);
+    transition: all 0.15s;
+  }
+
+  .file-btn:hover { border-color: var(--accent); color: var(--accent-dark); }
+
+  @media (max-width: 420px) {
+    header { padding: 20px 16px 0; }
+    nav { padding: 12px 16px 0; }
+    main { padding: 16px 16px 32px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ScanCard</h1>
+  <p>Share secrets through a camera, not a link.</p>
+</header>
+
+<nav>
+  <button class="active" id="tab-send-btn" onclick="switchTab('send')">Send</button>
+  <button id="tab-scan-btn" onclick="switchTab('scan')">Scan</button>
+</nav>
+
+<main>
+
+  <!-- ══════════ SEND TAB ══════════ -->
+  <div class="tab visible" id="tab-send">
+
+    <div class="card">
+      <span class="card-title">Secret Photo</span>
+      <label for="file-input">Choose a photo to hide</label>
+      <div class="file-pick">
+        <label class="file-btn" for="file-input">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 1v10M4 7l4-4 4 4M2 13h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Pick Photo
+        </label>
+        <input type="file" id="file-input" accept="image/*" onchange="onFileChosen(event)">
+        <label class="file-btn" id="cam-capture-btn" for="cam-capture-input">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="9" r="3" stroke="currentColor" stroke-width="1.6"/><path d="M1 5.5C1 4.67 1.67 4 2.5 4H4l1-2h6l1 2h1.5C14.33 4 15 4.67 15 5.5v7c0 .83-.67 1.5-1.5 1.5h-11C1.67 14 1 13.33 1 12.5v-7z" stroke="currentColor" stroke-width="1.6"/></svg>
+          Camera
+        </label>
+        <input type="file" id="cam-capture-input" accept="image/*" capture="environment" onchange="onFileChosen(event)">
+        <span id="file-name" style="font-size:0.76rem;color:var(--sub);">No file chosen</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <span class="card-title">Base URL (optional)</span>
+      <label for="base-url">If hosting the image externally, set the base URL here</label>
+      <input type="url" id="base-url" placeholder="https://example.com/i/" autocomplete="off" spellcheck="false">
+      <p style="font-size:0.74rem;color:var(--sub);">Leave blank for same-device local decode (IndexedDB). With a base URL, set up hosting and point GET /i/:id to the raw PNG.</p>
+    </div>
+
+    <div class="card">
+      <span class="card-title">Card Appearance</span>
+      <div class="slider-row">
+        <span>Stealth</span>
+        <input type="range" id="reliability-slider" min="0" max="100" value="50" oninput="onSliderChange()">
+        <span>Camera</span>
+      </div>
+      <p id="slider-hint" style="font-size:0.73rem;color:var(--sub);">1-bit grey: <span id="grey-val">200</span>/255</p>
+      <div class="slider-row" style="margin-top:4px;">
+        <span style="font-size:0.74rem;">Cell px:</span>
+        <input type="range" id="cell-slider" min="12" max="32" step="4" value="24" oninput="onCellSliderChange()">
+        <span id="cell-val" style="font-size:0.74rem;">24px</span>
+      </div>
+    </div>
+
+    <div class="card" id="card-wrap" style="display:none;">
+      <span class="card-title">Scan Card</span>
+      <canvas id="card-canvas"></canvas>
+      <div id="send-status" class="status hidden"></div>
+      <div class="row-btns">
+        <button class="btn btn-primary btn-sm" onclick="downloadCard()">Download PNG</button>
+        <button class="btn btn-ghost btn-sm" onclick="regenCard()">Regenerate</button>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn btn-primary" id="encode-btn" onclick="encodeCard()" disabled>Encode Card</button>
+    </div>
+    <div id="encode-status" class="status hidden"></div>
+
+  </div>
+  <!-- /send -->
+
+  <!-- ══════════ SCAN TAB ══════════ -->
+  <div class="tab" id="tab-scan">
+
+    <div class="card">
+      <span class="card-title">Camera</span>
+      <div id="video-wrap">
+        <video id="scan-video" autoplay playsinline muted></video>
+        <div id="scan-overlay"></div>
+      </div>
+      <div class="cam-controls">
+        <button class="btn btn-primary" id="start-cam-btn" onclick="startCamera()">Start Camera</button>
+        <button class="btn btn-ghost" id="capture-btn" onclick="captureFrame()" disabled>Capture Frame</button>
+        <button class="btn btn-ghost btn-sm" id="stop-cam-btn" onclick="stopCamera()" disabled>Stop</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <span class="card-title">Or Upload Card Photo</span>
+      <label class="file-btn" for="scan-file-input" style="width:fit-content;">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 1v10M4 7l4-4 4 4M2 13h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Upload Card Image
+      </label>
+      <input type="file" id="scan-file-input" accept="image/*" onchange="onScanFileUpload(event)" style="display:none;">
+    </div>
+
+    <div id="scan-status" class="status hidden"></div>
+    <img id="result-img" alt="Decoded secret image">
+    <canvas id="scan-canvas"></canvas>
+    <canvas id="decode-canvas"></canvas>
+
+  </div>
+  <!-- /scan -->
+
+</main>
+
+<script>
+'use strict';
+
+// ─────────────────────────────────────────────
+//  CONSTANTS & CONFIG
+// ─────────────────────────────────────────────
+const MAGIC       = 0xA55A;
+const COLS        = 16;
+const BORDER_CSS  = 10;   // px finder border
+const CORNER_LEN  = 24;   // px corner L-mark length
+const FINDER_HUE  = 193;  // cyan-ish hue for finder color detection
+const FINDER_COLOR = '#00B4D8';
+const DB_NAME     = 'scancard';
+const DB_STORE    = 'images';
+
+let currentPayload = null;
+let currentCellPx  = 24;
+let currentGreyVal = 200;
+let mediaStream    = null;
+
+// ─────────────────────────────────────────────
+//  UI HELPERS
+// ─────────────────────────────────────────────
+function switchTab(name) {
+  document.getElementById('tab-send').classList.toggle('visible', name === 'send');
+  document.getElementById('tab-scan').classList.toggle('visible', name === 'scan');
+  document.getElementById('tab-send-btn').classList.toggle('active', name === 'send');
+  document.getElementById('tab-scan-btn').classList.toggle('active', name === 'scan');
+  if (name !== 'scan') stopCamera();
+}
+
+function setStatus(id, msg, type) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.className = 'status ' + (type || 'info');
+}
+
+function hideStatus(id) {
+  document.getElementById(id).className = 'status hidden';
+}
+
+function onSliderChange() {
+  const v = parseInt(document.getElementById('reliability-slider').value);
+  // 0=stealth→220, 50→200, 100=camera→170
+  currentGreyVal = Math.round(220 - (v / 100) * 50);
+  document.getElementById('grey-val').textContent = currentGreyVal;
+  if (currentPayload) drawCard(currentPayload, currentCellPx, currentGreyVal);
+}
+
+function onCellSliderChange() {
+  const v = parseInt(document.getElementById('cell-slider').value);
+  currentCellPx = v;
+  document.getElementById('cell-val').textContent = v + 'px';
+  if (currentPayload) drawCard(currentPayload, currentCellPx, currentGreyVal);
+}
+
+// ─────────────────────────────────────────────
+//  INDEXEDDB
+// ─────────────────────────────────────────────
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = e => e.target.result.createObjectStore(DB_STORE);
+    req.onsuccess = e => resolve(e.target.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbPut(id, blob) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readwrite');
+    tx.objectStore(DB_STORE).put(blob, id);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function dbGet(id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readonly');
+    const req = tx.objectStore(DB_STORE).get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function randomHex8() {
+  return [...crypto.getRandomValues(new Uint8Array(4))]
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ─────────────────────────────────────────────
+//  CRC-16/CCITT-FALSE  (poly=0x1021, init=0xFFFF, refin=false, refout=false)
+// ─────────────────────────────────────────────
+function crc16(bytes) {
+  let crc = 0xFFFF;
+  for (const b of bytes) {
+    crc ^= (b << 8);
+    for (let i = 0; i < 8; i++) {
+      crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) : (crc << 1);
+      crc &= 0xFFFF;
+    }
+  }
+  return crc;
+}
+
+// ─────────────────────────────────────────────
+//  PAYLOAD → BIT ARRAY
+// ─────────────────────────────────────────────
+function payloadToBits(payloadStr) {
+  const payloadBytes = new TextEncoder().encode(payloadStr);
+  const len = payloadBytes.length;
+  const crc = crc16(payloadBytes);
+
+  // header: magic(2) + length(2) + payload(N) + crc(2)
+  const frame = new Uint8Array(4 + len + 2);
+  frame[0] = (MAGIC >> 8) & 0xFF;
+  frame[1] = MAGIC & 0xFF;
+  frame[2] = (len >> 8) & 0xFF;
+  frame[3] = len & 0xFF;
+  frame.set(payloadBytes, 4);
+  frame[4 + len]     = (crc >> 8) & 0xFF;
+  frame[4 + len + 1] = crc & 0xFF;
+
+  // convert to bits, MSB first
+  const bits = [];
+  for (const byte of frame) {
+    for (let i = 7; i >= 0; i--) bits.push((byte >> i) & 1);
+  }
+
+  // pad to full row of COLS
+  while (bits.length % COLS !== 0) bits.push(0);
+  return bits;
+}
+
+// ─────────────────────────────────────────────
+//  DRAW CARD
+// ─────────────────────────────────────────────
+function drawCard(payloadStr, cellPx, greyVal) {
+  const bits = payloadToBits(payloadStr);
+  const rows = bits.length / COLS;
+
+  const canvas = document.getElementById('card-canvas');
+  const totalW = BORDER_CSS * 2 + COLS * cellPx;
+  const totalH = BORDER_CSS * 2 + rows * cellPx;
+  canvas.width  = totalW;
+  canvas.height = totalH;
+
+  const ctx = canvas.getContext('2d');
+
+  // background near-white
+  ctx.fillStyle = '#f9f9f8';
+  ctx.fillRect(0, 0, totalW, totalH);
+
+  // draw data cells
+  for (let i = 0; i < bits.length; i++) {
+    const col = i % COLS;
+    const row = Math.floor(i / COLS);
+    const x = BORDER_CSS + col * cellPx;
+    const y = BORDER_CSS + row * cellPx;
+    const v = bits[i] === 0 ? 255 : greyVal;
+    ctx.fillStyle = `rgb(${v},${v},${v})`;
+    ctx.fillRect(x, y, cellPx, cellPx);
+  }
+
+  // thin finder border (just the outline, not filled)
+  ctx.strokeStyle = FINDER_COLOR;
+  ctx.lineWidth   = BORDER_CSS;
+  ctx.strokeRect(
+    BORDER_CSS / 2,
+    BORDER_CSS / 2,
+    totalW - BORDER_CSS,
+    totalH - BORDER_CSS
+  );
+
+  // corner L-marks  (small extra marks at each corner for alignment)
+  const cL = CORNER_LEN;
+  const b2 = BORDER_CSS;
+  ctx.fillStyle = FINDER_COLOR;
+  // top-left
+  ctx.fillRect(0, 0, cL, b2);
+  ctx.fillRect(0, 0, b2, cL);
+  // top-right
+  ctx.fillRect(totalW - cL, 0, cL, b2);
+  ctx.fillRect(totalW - b2, 0, b2, cL);
+  // bottom-left
+  ctx.fillRect(0, totalH - b2, cL, b2);
+  ctx.fillRect(0, totalH - cL, b2, cL);
+  // bottom-right
+  ctx.fillRect(totalW - cL, totalH - b2, cL, b2);
+  ctx.fillRect(totalW - b2, totalH - cL, b2, cL);
+}
+
+// ─────────────────────────────────────────────
+//  SEND TAB — file chosen
+// ─────────────────────────────────────────────
+let chosenFile = null;
+
+function onFileChosen(e) {
+  chosenFile = e.target.files[0] || null;
+  document.getElementById('file-name').textContent = chosenFile ? chosenFile.name : 'No file chosen';
+  document.getElementById('encode-btn').disabled = !chosenFile;
+  hideStatus('encode-status');
+}
+
+async function encodeCard() {
+  if (!chosenFile) return;
+  const btn = document.getElementById('encode-btn');
+  btn.disabled = true;
+  setStatus('encode-status', 'Storing image…', 'info');
+
+  try {
+    const id  = randomHex8();
+    const blob = new Blob([await chosenFile.arrayBuffer()], { type: chosenFile.type || 'image/png' });
+    await dbPut(id, blob);
+
+    const base = document.getElementById('base-url').value.trim().replace(/\/$/, '');
+    const payload = base ? `${base}/${id}` : `local:${id}`;
+    currentPayload = payload;
+
+    document.getElementById('card-wrap').style.display = 'flex';
+    drawCard(payload, currentCellPx, currentGreyVal);
+
+    setStatus('encode-status',
+      `ID: ${id}\nPayload: ${payload}`,
+      'ok');
+    setStatus('send-status',
+      `Stored locally. Payload: ${payload}`,
+      'ok');
+  } catch (err) {
+    setStatus('encode-status', 'Error: ' + err.message, 'err');
+  }
+
+  btn.disabled = false;
+}
+
+function regenCard() {
+  if (currentPayload) drawCard(currentPayload, currentCellPx, currentGreyVal);
+}
+
+function downloadCard() {
+  const canvas = document.getElementById('card-canvas');
+  const a = document.createElement('a');
+  a.href = canvas.toDataURL('image/png');
+  a.download = 'scancard.png';
+  a.click();
+}
+
+// ─────────────────────────────────────────────
+//  SCAN TAB — camera
+// ─────────────────────────────────────────────
+async function startCamera() {
+  try {
+    setStatus('scan-status', 'Requesting camera…', 'info');
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 1280 } }
+    });
+    document.getElementById('scan-video').srcObject = mediaStream;
+    document.getElementById('capture-btn').disabled = false;
+    document.getElementById('stop-cam-btn').disabled = false;
+    hideStatus('scan-status');
+  } catch (err) {
+    setStatus('scan-status', 'Camera error: ' + err.message, 'err');
+  }
+}
+
+function stopCamera() {
+  if (mediaStream) {
+    mediaStream.getTracks().forEach(t => t.stop());
+    mediaStream = null;
+    document.getElementById('scan-video').srcObject = null;
+    document.getElementById('capture-btn').disabled = true;
+    document.getElementById('stop-cam-btn').disabled = true;
+  }
+}
+
+function captureFrame() {
+  const video = document.getElementById('scan-video');
+  if (!video.srcObject) return;
+  const canvas = document.getElementById('scan-canvas');
+  canvas.width  = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0);
+  decodeFromCanvas(canvas);
+}
+
+function onScanFileUpload(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => {
+    const canvas = document.getElementById('scan-canvas');
+    canvas.width  = img.width;
+    canvas.height = img.height;
+    canvas.getContext('2d').drawImage(img, 0, 0);
+    decodeFromCanvas(canvas);
+  };
+  img.src = URL.createObjectURL(file);
+}
+
+// ─────────────────────────────────────────────
+//  FINDER DETECTION
+// ─────────────────────────────────────────────
+function detectFinder(ctx, W, H) {
+  // Scan for the cyan finder border by hue
+  const data = ctx.getImageData(0, 0, W, H).data;
+
+  function hue(r, g, b) {
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    if (max === min) return 0;
+    let h;
+    if (max === r)      h = (g - b) / (max - min) % 6;
+    else if (max === g) h = (b - r) / (max - min) + 2;
+    else                h = (r - g) / (max - min) + 4;
+    return ((h * 60) + 360) % 360;
+  }
+
+  // Collect cyan-ish pixel coordinates
+  const finderPixels = [];
+  for (let y = 0; y < H; y += 2) {
+    for (let x = 0; x < W; x += 2) {
+      const idx = (y * W + x) * 4;
+      const r = data[idx], g = data[idx+1], b = data[idx+2];
+      const sat = (Math.max(r,g,b) - Math.min(r,g,b)) / 255;
+      const lum = (r + g + b) / 3;
+      if (sat < 0.25 || lum < 30) continue;
+      const h = hue(r, g, b);
+      // FINDER_HUE=193, accept ±35°
+      if (Math.abs(h - FINDER_HUE) < 35 || Math.abs(h - FINDER_HUE - 360) < 35 || Math.abs(h - FINDER_HUE + 360) < 35) {
+        finderPixels.push([x, y]);
+      }
+    }
+  }
+
+  if (finderPixels.length < 16) return null;
+
+  // Bounding box of all finder pixels
+  let minX = W, maxX = 0, minY = H, maxY = 0;
+  for (const [x, y] of finderPixels) {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+
+  const areaW = maxX - minX;
+  const areaH = maxY - minY;
+  if (areaW < 40 || areaH < 40) return null;
+
+  return { minX, minY, maxX, maxY, areaW, areaH };
+}
+
+// ─────────────────────────────────────────────
+//  CELL SAMPLING  (center 40% of each cell)
+// ─────────────────────────────────────────────
+function sampleCell(imgData, W, H, cx, cy, cellPx) {
+  const margin = Math.floor(cellPx * 0.30);
+  const sz = cellPx - margin * 2;
+  if (sz <= 0) return 128;
+  let sum = 0, n = 0;
+  for (let dy = 0; dy < sz; dy++) {
+    for (let dx = 0; dx < sz; dx++) {
+      const px = Math.round(cx + margin + dx);
+      const py = Math.round(cy + margin + dy);
+      if (px < 0 || px >= W || py < 0 || py >= H) continue;
+      const idx = (py * W + px) * 4;
+      const lum = imgData[idx] * 0.299 + imgData[idx+1] * 0.587 + imgData[idx+2] * 0.114;
+      sum += lum; n++;
+    }
+  }
+  return n === 0 ? 128 : sum / n;
+}
+
+// ─────────────────────────────────────────────
+//  BITS → PAYLOAD  (verify magic, length, crc)
+// ─────────────────────────────────────────────
+function bitsToPayload(bits) {
+  // pack bits → bytes
+  const byteCount = Math.floor(bits.length / 8);
+  const bytes = new Uint8Array(byteCount);
+  for (let i = 0; i < byteCount; i++) {
+    let b = 0;
+    for (let j = 0; j < 8; j++) b = (b << 1) | (bits[i * 8 + j] & 1);
+    bytes[i] = b;
+  }
+
+  if (byteCount < 6) return { ok: false, error: 'Too few bytes' };
+
+  const magic  = (bytes[0] << 8) | bytes[1];
+  const length = (bytes[2] << 8) | bytes[3];
+
+  if (magic !== MAGIC) return { ok: false, error: `Bad magic: 0x${magic.toString(16).toUpperCase()}` };
+  if (4 + length + 2 > byteCount) return { ok: false, error: 'Length overrun' };
+
+  const payloadBytes = bytes.slice(4, 4 + length);
+  const crcStored    = (bytes[4 + length] << 8) | bytes[4 + length + 1];
+  const crcCalc      = crc16(payloadBytes);
+
+  if (crcStored !== crcCalc) return {
+    ok: false,
+    error: `CRC mismatch: got 0x${crcCalc.toString(16).toUpperCase()}, expected 0x${crcStored.toString(16).toUpperCase()}`
+  };
+
+  const payload = new TextDecoder().decode(payloadBytes);
+  return { ok: true, payload };
+}
+
+// ─────────────────────────────────────────────
+//  MAIN DECODE ENTRY
+// ─────────────────────────────────────────────
+async function decodeFromCanvas(srcCanvas) {
+  setStatus('scan-status', 'Analyzing image…', 'info');
+  document.getElementById('result-img').style.display = 'none';
+
+  const ctx = srcCanvas.getContext('2d');
+  const W = srcCanvas.width, H = srcCanvas.height;
+
+  // 1. Detect finder
+  const finder = detectFinder(ctx, W, H);
+  if (!finder) {
+    setStatus('scan-status', 'No scan card frame found — make sure the colored border is visible.', 'err');
+    return;
+  }
+
+  // 2. Estimate border width as ~3% of shorter side of finder area
+  const shortSide  = Math.min(finder.areaW, finder.areaH);
+  const borderEst  = Math.max(6, Math.round(shortSide * 0.03));
+
+  // 3. Inner grid region
+  const innerX = finder.minX + borderEst;
+  const innerY = finder.minY + borderEst;
+  const innerW = finder.areaW - borderEst * 2;
+  const innerH = finder.areaH - borderEst * 2;
+
+  if (innerW < 16 || innerH < 16) {
+    setStatus('scan-status', 'Frame too small to decode.', 'err');
+    return;
+  }
+
+  // 4. Cell size estimate: innerW / COLS
+  const cellPxEst = innerW / COLS;
+  const rows = Math.round(innerH / cellPxEst);
+
+  if (rows < 2) {
+    setStatus('scan-status', 'Grid too short — capture more of the card.', 'err');
+    return;
+  }
+
+  // 5. Get image data and sample every cell
+  const imgData = ctx.getImageData(0, 0, W, H).data;
+  const lumValues = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const cx = innerX + c * cellPxEst;
+      const cy = innerY + r * cellPxEst;
+      lumValues.push(sampleCell(imgData, W, H, cx, cy, cellPxEst));
+    }
+  }
+
+  // 6. Adaptive threshold: midpoint of (min + max) luma
+  const minLum = Math.min(...lumValues);
+  const maxLum = Math.max(...lumValues);
+  const threshold = (minLum + maxLum) / 2;
+
+  // 7. Quantize: luma > threshold → 0 (white), luma <= threshold → 1 (dark)
+  const bits = lumValues.map(l => l <= threshold ? 1 : 0);
+
+  // 8. Decode payload
+  const result = bitsToPayload(bits);
+  if (!result.ok) {
+    setStatus('scan-status', `Decode failed: ${result.error}`, 'err');
+    return;
+  }
+
+  const payload = result.payload;
+  setStatus('scan-status', `Payload: ${payload} — Fetching image…`, 'info');
+
+  // 9. Fetch or local lookup
+  try {
+    let blobUrl;
+
+    if (payload.startsWith('local:')) {
+      const id = payload.slice(6);
+      const blob = await dbGet(id);
+      if (!blob) {
+        setStatus('scan-status', `Local ID "${id}" not found in this browser's storage.`, 'err');
+        return;
+      }
+      blobUrl = URL.createObjectURL(blob);
+    } else if (payload.startsWith('http://') || payload.startsWith('https://')) {
+      const resp = await fetch(payload);
+      if (!resp.ok) {
+        setStatus('scan-status', `Fetch failed: HTTP ${resp.status} for ${payload}`, 'err');
+        return;
+      }
+      const blob = await resp.blob();
+      blobUrl = URL.createObjectURL(blob);
+    } else {
+      setStatus('scan-status', `Unrecognised payload format: ${payload}`, 'err');
+      return;
+    }
+
+    const img = document.getElementById('result-img');
+    img.src = blobUrl;
+    img.style.display = 'block';
+    setStatus('scan-status', `✓ Success. Payload: ${payload}`, 'ok');
+  } catch (err) {
+    setStatus('scan-status', `Error fetching image: ${err.message}`, 'err');
+  }
+}
+</script>
+</body>
+</html>
